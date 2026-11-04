@@ -1,0 +1,13 @@
+# Separate test profile. Existing config_eldenring.toml stays unchanged.
+[modengine]
+debug = false
+external_dlls = ["ersc.dll", "shared-loot/SharedLoot.dll"]
+
+[extension.mod_loader]
+enabled = true
+loose_params = false
+# Initial testing uses vanilla assets: no randomizer, fasttorrent, or other packages.
+mods = []
+
+[extension.scylla_hide]
+enabled = false

@@ -1,0 +1,24 @@
+/build/
+/out/
+/.vs/
+*.user
+*.log
+*.dll
+*.exe
+*.pdb
+ersc_settings.ini
+*.sl2
+*.co2
+*.bak
+/build-*/
+/work/
+__pycache__/
+/dist/
+*.zip
+**/SharedLoot.local.ini
+/docs/local-setup.md
+
+# Runtime diagnostics and crash reports
+**/logs/
+*.jsonl
+*.dmp

@@ -1,0 +1,12 @@
+[modengine]
+debug = false
+external_dlls = ["ersc.dll", "shared-loot/SharedLoot.dll"]
+
+[extension.mod_loader]
+enabled = true
+loose_params = false
+# Vanilla assets for the first Steam integration test.
+mods = []
+
+[extension.scylla_hide]
+enabled = false
