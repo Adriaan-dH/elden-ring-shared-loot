@@ -10,6 +10,7 @@
 #include "shared_loot.h"
 #include "award_packet.h"
 #include "source_filter.h"
+#include "pickup_source.h"
 #include "rowa_transport.h"
 #include "steam_bridge.h"
 #include "inventory_probe.h"
@@ -95,6 +96,7 @@ struct Record {
     bool is_seamless;
     unsigned kind;
     AwardPacket packet;
+    shared_loot::PickupEvidence pickup{};
     std::uint64_t delivery_generation = 0, delivery_sequence = 0;
     shared_loot::InventoryCounts before{}, after{};
 };
@@ -213,7 +215,8 @@ bool issue_remote_rowa(const Record& source, void* manager, void* notification,
     return true;
 }
 void process_network_award(const Record& source, void* manager, const void* context) {
-    if (!InterlockedCompareExchange(&network_started, 0, 0) || !source.valid)
+    if (!InterlockedCompareExchange(&network_started, 0, 0) || !source.valid ||
+        !shared_loot::pickup_source_allows_share(source.pickup))
         return;
     if (InterlockedCompareExchange(&outbound_enabled, 0, 0) &&
         shared_loot::rowa_test_trigger(source.is_game, source.caller - source.module, source.flags,
@@ -246,9 +249,9 @@ void capture_steam_award(const Record& source) {
     if (source.caller - source.module == 0x56441c &&
         !InterlockedCompareExchange(&steam_gathering, 0, 0))
         return;
-    if (shared_loot::broad_pickup_source(source.is_game, source.is_seamless,
+    if (shared_loot::shareable_pickup_source(source.is_game, source.is_seamless,
                                              source.caller - source.module, source.flags,
-                                             source.packet) &&
+                                             source.packet, source.pickup) &&
         steam_bridge.capture(source.packet, GetTickCount64())) {
         Record sent = source;
         sent.kind = 4;
@@ -297,6 +300,15 @@ std::uintptr_t observe_award(void* manager, const void* packet, void* output, st
     record.is_game = record.module == reinterpret_cast<std::uintptr_t>(GetModuleHandleW(nullptr));
     record.is_seamless = _stricmp(record.module_name, "ersc.dll") == 0;
     record.valid = snapshot(packet, record.packet);
+    // Source evidence is copied while the queue record is still alive. This
+    // never suppresses the collector's native acquisition, only our broadcast.
+    const shared_loot::MemoryReader reader{
+        nullptr, [](void*, std::uintptr_t address, void* target, std::size_t size) {
+            return read_local(reinterpret_cast<const void*>(address), target, size);
+        }};
+    record.pickup = shared_loot::read_pickup_source(
+        reader, record.is_game, record.caller - record.module,
+        reinterpret_cast<std::uintptr_t>(packet), reinterpret_cast<std::uintptr_t>(output));
     push_record(record);
     auto result = original_award(manager, packet, output, flags);
     run_rowa_test(record, manager, output);
@@ -645,6 +657,13 @@ bool profile_matches(HMODULE game, const wchar_t* path, FILE* log) {
         log_text("{\"event\":\"disabled\",\"reason\":\"loaded_image_mismatch\"}\n", log);
         return false;
     }
+    unsigned char world_call[sizeof(shared_loot::profile::world_award_call)]{};
+    if (!read_local(base + shared_loot::profile::world_award_call_rva, world_call,
+                    sizeof(world_call)) ||
+        std::memcmp(world_call, shared_loot::profile::world_award_call, sizeof(world_call))) {
+        log_text("{\"event\":\"disabled\",\"reason\":\"world_source_layout_changed\"}\n", log);
+        return false;
+    }
     unsigned char prologue[32]{};
     if (!read_local(base + shared_loot::profile::award_rva, prologue, 32) ||
         std::memcmp(prologue, shared_loot::profile::prologue, 32)) {
@@ -714,19 +733,20 @@ void flush_records(FILE* log) {
         }
         auto hint = shared_loot::source_hint(record.is_game, record.is_seamless,
                                              record.caller - record.module, record.flags);
-        bool eligible =
-            record.valid && (record.kind == 4 ||
-                             (record.kind == 0 &&
-                              (record.caller - record.module != 0x56441c ||
-                               InterlockedCompareExchange(&steam_gathering, 0, 0)) &&
-                              shared_loot::broad_pickup_source(record.is_game, record.is_seamless,
-                                                               record.caller - record.module,
-                                                               record.flags, record.packet)));
+        bool eligible = record.valid && shared_loot::pickup_source_allows_share(record.pickup) &&
+                        (record.kind == 4 ||
+                         (record.kind == 0 &&
+                          (record.caller - record.module != 0x56441c ||
+                           InterlockedCompareExchange(&steam_gathering, 0, 0)) &&
+                          shared_loot::shareable_pickup_source(
+                              record.is_game, record.is_seamless, record.caller - record.module,
+                              record.flags, record.packet, record.pickup)));
         log_printf(
             log,
             "{\"event\":\"%s\",\"tick_ms\":%llu,\"thread\":%lu,\"caller_module\":\"%s\","
             "\"caller_rva\":\"0x%llx\",\"flags\":%u,\"packet_valid\":%s,\"source_hint\":"
-            "\"%s\",\"sharing_eligible\":%s,"
+            "\"%s\",\"sharing_eligible\":%s,\"pickup_source\":\"%s\","
+            "\"object_handle\":\"0x%08x\",\"record_flags\":\"0x%04x\","
             "\"generation\":\"%llx\",\"delivery\":%llu,\"items\":[",
             record.kind == 1   ? "grant_test_request"
             : record.kind == 2 ? "rowa_sent"
@@ -738,7 +758,8 @@ void flush_records(FILE* log) {
             record.module_name, static_cast<unsigned long long>(record.caller - record.module),
             record.flags, record.valid ? "true" : "false",
             record.kind ? "addon_action" : shared_loot::hint_name(hint),
-            eligible ? "true" : "false",
+            eligible ? "true" : "false", shared_loot::pickup_source_name(record.pickup.source),
+            record.pickup.object_handle, static_cast<unsigned>(record.pickup.record_flags),
             static_cast<unsigned long long>(record.delivery_generation),
             static_cast<unsigned long long>(record.delivery_sequence));
         if (record.valid)
@@ -858,7 +879,7 @@ DWORD WINAPI diagnostic_worker(void* parameter) {
     InterlockedExchange(&logging_enabled, settings.logging ? 1 : 0);
     InterlockedExchange(&shop_sharing_enabled, settings.shop_purchases ? 1 : 0);
     FILE* log = create_runtime_log(path, settings.logging);
-    log_text("{\"event\":\"startup\",\"build\":\"0.5.0-test.2\",\"mode\":\"steam_shared_loot\","
+    log_text("{\"event\":\"startup\",\"build\":\"0.5.0-test.3\",\"mode\":\"steam_shared_loot\","
              "\"lan_bridge\":false}\n",
              log);
     log_printf(log,

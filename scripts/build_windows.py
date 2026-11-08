@@ -47,6 +47,7 @@ subprocess.run(base + ["tests/rowa_transport_tests.cpp", "src/rowa_transport.cpp
 subprocess.run(base + ["tests/inventory_probe_tests.cpp", "src/inventory_probe.cpp", "src/session_router.cpp", "-o", str(output / "inventory_probe_tests.exe")], cwd=ROOT, check=True)
 subprocess.run(base + ["tests/delivery_buffer_tests.cpp", "src/session_router.cpp", "-o", str(output / "delivery_buffer_tests.exe")], cwd=ROOT, check=True)
 subprocess.run(base + ["tests/shop_purchase_tests.cpp", "src/shop_purchase.cpp", "src/inventory_probe.cpp", "src/session_router.cpp", "-o", str(output / "shop_purchase_tests.exe")], cwd=ROOT, check=True)
+subprocess.run(base + ["tests/pickup_source_tests.cpp", "src/session_router.cpp", "-o", str(output / "pickup_source_tests.exe")], cwd=ROOT, check=True)
 mock = output / "mock-steam"
 mock.mkdir(exist_ok=True)
 subprocess.run(base + ["-shared", "tests/fake_steam_api.cpp", "src/session_router.cpp", "-o", str(mock / "steam_api64.dll")], cwd=ROOT, check=True)

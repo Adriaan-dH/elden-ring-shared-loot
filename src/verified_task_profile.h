@@ -20,6 +20,11 @@ inline constexpr std::uint32_t player_storage_offset = 0x8d0;
 inline constexpr std::uint32_t chr_modules_offset = 0x190;
 inline constexpr std::uint32_t chr_hp_offset = 0x138;
 inline constexpr std::uint32_t chr_death_flags_offset = 0x1c5;
+// Queue-record acquisition call site: RDX = record+0x40, R8 = record+0xe4.
+// Guard the loaded instructions as well as the file hash before prefix reads.
+inline constexpr std::uint32_t world_award_call_rva = 0x55ce1e;
+inline constexpr unsigned char world_award_call[16] = {
+    0x4c, 0x8d, 0x45, 0x34, 0x48, 0x8d, 0x55, 0x90, 0x49, 0x8b, 0xcc, 0xe8, 0x82, 0x4a, 0x00, 0x00};
 // Purchase commit method: item creation -> stock update -> committed-purchase
 // stats increment. Shop previews and storage transfers do not call this method.
 inline constexpr std::uint32_t shop_transaction_rva = 0x79ac40;
