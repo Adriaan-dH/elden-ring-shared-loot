@@ -150,7 +150,8 @@ BOOL CreateTrampolineFunction(PTRAMPOLINE ct)
             // Instructions using RIP relative addressing. (ModR/M = 00???101B)
 
             // Modify the RIP relative address.
-            PUINT32 pRelAddr;
+            UINT32 relAddr;
+            UINT8* pRelAddr;
 
             // Avoid using memcpy to reduce the footprint.
 #ifndef ALLOW_INTRINSICS
@@ -161,9 +162,9 @@ BOOL CreateTrampolineFunction(PTRAMPOLINE ct)
             pCopySrc = instBuf;
 
             // Relative address is stored at (instruction length - immediate value length - 4).
-            pRelAddr = (PUINT32)(instBuf + hs.len - ((hs.flags & 0x3C) >> 2) - 4);
-            *pRelAddr
-                = (UINT32)((pOldInst + hs.len + (INT32)hs.disp.disp32) - (pNewInst + hs.len));
+            pRelAddr = instBuf + hs.len - ((hs.flags & 0x3C) >> 2) - 4;
+            relAddr = (UINT32)((pOldInst + hs.len + (INT32)hs.disp.disp32) - (pNewInst + hs.len));
+            memcpy(pRelAddr, &relAddr, sizeof(relAddr));
 
             // Complete the function if JMP (FF /4).
             if (hs.opcode == 0xFF && hs.modrm_reg == 4)

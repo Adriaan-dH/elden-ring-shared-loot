@@ -17,6 +17,7 @@ unsigned int hde64_disasm(const void *code, hde64s *hs)
     uint8_t *ht = hde64_table, m_mod, m_reg, m_rm, disp_size = 0;
     uint8_t op64 = 0;
 
+    // Instruction fields and opcode tables need not be aligned.
     memset(hs, 0, sizeof(hde64s));
 
     for (x = 16; x; x--)
@@ -94,7 +95,7 @@ unsigned int hde64_disasm(const void *code, hde64s *hs)
     x = 0;
     if (cflags & C_GROUP) {
         uint16_t t;
-        t = *(uint16_t *)(ht + (cflags & 0x7f));
+        memcpy(&t, (ht + (cflags & 0x7f)), sizeof(t));
         cflags = (uint8_t)t;
         x = (uint8_t)(t >> 8);
     }
@@ -267,11 +268,11 @@ unsigned int hde64_disasm(const void *code, hde64s *hs)
                 break;
             case 2:
                 hs->flags |= F_DISP16;
-                hs->disp.disp16 = *(uint16_t *)p;
+                memcpy(&hs->disp.disp16, p, sizeof(hs->disp.disp16));
                 break;
             case 4:
                 hs->flags |= F_DISP32;
-                hs->disp.disp32 = *(uint32_t *)p;
+                memcpy(&hs->disp.disp32, p, sizeof(hs->disp.disp32));
                 break;
         }
         p += disp_size;
@@ -282,7 +283,7 @@ unsigned int hde64_disasm(const void *code, hde64s *hs)
         if (cflags & C_REL32) {
             if (pref & PRE_66) {
                 hs->flags |= F_IMM16 | F_RELATIVE;
-                hs->imm.imm16 = *(uint16_t *)p;
+                memcpy(&hs->imm.imm16, p, sizeof(hs->imm.imm16));
                 p += 2;
                 goto disasm_done;
             }
@@ -290,11 +291,11 @@ unsigned int hde64_disasm(const void *code, hde64s *hs)
         }
         if (op64) {
             hs->flags |= F_IMM64;
-            hs->imm.imm64 = *(uint64_t *)p;
+            memcpy(&hs->imm.imm64, p, sizeof(hs->imm.imm64));
             p += 8;
         } else if (!(pref & PRE_66)) {
             hs->flags |= F_IMM32;
-            hs->imm.imm32 = *(uint32_t *)p;
+            memcpy(&hs->imm.imm32, p, sizeof(hs->imm.imm32));
             p += 4;
         } else
             goto imm16_ok;
@@ -304,7 +305,7 @@ unsigned int hde64_disasm(const void *code, hde64s *hs)
     if (cflags & C_IMM16) {
       imm16_ok:
         hs->flags |= F_IMM16;
-        hs->imm.imm16 = *(uint16_t *)p;
+        memcpy(&hs->imm.imm16, p, sizeof(hs->imm.imm16));
         p += 2;
     }
     if (cflags & C_IMM8) {
@@ -315,7 +316,7 @@ unsigned int hde64_disasm(const void *code, hde64s *hs)
     if (cflags & C_REL32) {
       rel32_ok:
         hs->flags |= F_IMM32 | F_RELATIVE;
-        hs->imm.imm32 = *(uint32_t *)p;
+        memcpy(&hs->imm.imm32, p, sizeof(hs->imm.imm32));
         p += 4;
     } else if (cflags & C_REL8) {
         hs->flags |= F_IMM8 | F_RELATIVE;

@@ -1,5 +1,8 @@
 {
   "repository": "https://github.com/TsudaKageyu/minhook",
   "tag": "v1.3.4",
-  "commit": "c3fcafdc10146beb5919319d0683e44e3c30d537"
+  "commit": "c3fcafdc10146beb5919319d0683e44e3c30d537",
+  "local_changes": [
+    "Use byte copies for potentially unaligned x64 instruction fields in HDE64 and the trampoline builder."
+  ]
 }

@@ -8,6 +8,11 @@ TARGET = ROOT / "third_party" / "minhook"
 FILES = ["LICENSE.txt", "include/MinHook.h", "src/buffer.c", "src/buffer.h",
          "src/hook.c", "src/trampoline.c", "src/trampoline.h",
          "src/hde/hde64.c", "src/hde/hde64.h", "src/hde/table64.h", "src/hde/pstdint.h"]
+lock = TARGET / "upstream.json"
+installed = json.loads(lock.read_text()) if lock.exists() else {}
+if installed.get("local_changes"):
+    raise SystemExit("The vendored MinHook contains local fixes. Restore it from Git or review the fixes before updating.")
+
 request = urllib.request.Request(
     "https://api.github.com/repos/TsudaKageyu/minhook/git/ref/tags/v1.3.4",
     headers={"User-Agent": "elden-ring-shared-loot-build"})
@@ -17,8 +22,7 @@ if reference["type"] != "commit":
     raise SystemExit("Expected a lightweight tag; inspect upstream before updating")
 commit = reference["sha"]
 TARGET.mkdir(parents=True, exist_ok=True)
-lock = TARGET / "upstream.json"
-if lock.exists() and json.loads(lock.read_text())["commit"] != commit:
+if installed and installed["commit"] != commit:
     raise SystemExit("Upstream tag changed; refusing to replace pinned sources")
 for name in FILES:
     destination = TARGET / name
