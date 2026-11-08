@@ -1,4 +1,5 @@
 #include "session_router.h"
+#include "recipient_menu_gate.h"
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -44,7 +45,33 @@ AwardPacket loot() {
     p.entries[0] = {0x400006e0, 3, 0xffffffff, 0xffffffff};
     return p;
 }
+void check_menu_buffering() {
+    Party p;
+    RecipientMenuGate menu;
+    Delivery delivery{};
+    CHECK(menu.update(true, true, p.now) == MenuGateState::Busy);
+    CHECK(p.a.capture(loot(), p.now) == 1);
+    p.pump();
+    CHECK(p.b.stats().pending == 1);
+    // The recipient can send a purchase while its own incoming loot waits.
+    CHECK(p.b.capture(loot(), p.now, true) == 1);
+    p.pump();
+    CHECK(p.a.take_delivery(delivery, p.now) && delivery.shop_purchase);
+    p.now += 180000;
+    CHECK(menu.update(true, true, p.now) == MenuGateState::Busy);
+    CHECK(p.b.stats().pending == 1);
+    CHECK(menu.update(true, false, p.now) == MenuGateState::Settling);
+    CHECK(menu.update(false, false, p.now + 249) == MenuGateState::Unavailable);
+    p.now += 250;
+    CHECK(menu.update(true, false, p.now) == MenuGateState::Settling);
+    p.now += 250;
+    CHECK(menu.update(true, false, p.now) == MenuGateState::Ready);
+    CHECK(p.b.take_delivery(delivery, p.now) && !delivery.shop_purchase);
+    CHECK(p.b.finish_delivery(delivery, DeliveryReason::Verified, p.now));
+    CHECK(!p.b.take_delivery(delivery, p.now));
+}
 int main() {
+    check_menu_buffering();
     auto packet = loot();
     Party p;
     Delivery d{};

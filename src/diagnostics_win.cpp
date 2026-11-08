@@ -11,6 +11,7 @@
 #include "award_packet.h"
 #include "source_filter.h"
 #include "pickup_source.h"
+#include "recipient_menu_gate.h"
 #include "rowa_transport.h"
 #include "steam_bridge.h"
 #include "inventory_probe.h"
@@ -83,6 +84,12 @@ AwardFn original_award = nullptr;
 using ShopFn = std::uintptr_t (*)(void*);
 ShopFn original_shop = nullptr;
 volatile LONG logging_enabled = 1, shop_sharing_enabled = 1;
+struct MenuEvidence {
+    bool readable = false;
+    bool popup_job = false;
+    unsigned char hud = 0xff;
+    std::int32_t talk_id = -1;
+};
 // Snapshot only value data at the hook boundary. The worker must never retain
 // pointers to temporary game award packets or notification contexts.
 struct Record {
@@ -97,6 +104,7 @@ struct Record {
     unsigned kind;
     AwardPacket packet;
     shared_loot::PickupEvidence pickup{};
+    MenuEvidence menu{};
     std::uint64_t delivery_generation = 0, delivery_sequence = 0;
     shared_loot::InventoryCounts before{}, after{};
 };
@@ -454,6 +462,61 @@ bool install_shop_hook(HMODULE game, FILE* log) {
                MH_StatusToString(status), shared_loot::profile::shop_transaction_rva);
     return status == MH_OK;
 }
+// These layout checks are tied to the executable hash guard. In particular,
+// verify the FE object's menu link before interpreting its HUD byte.
+MenuEvidence recipient_menu(std::uintptr_t base) {
+    using namespace shared_loot::profile;
+    MenuEvidence result{};
+    const auto read = [](std::uintptr_t address, auto& value) {
+        return read_local(reinterpret_cast<const void*>(address), &value, sizeof(value));
+    };
+    const auto matches = [&](std::uintptr_t object, std::uint32_t vtable_rva) {
+        std::uintptr_t vtable = 0;
+        return object && read(object, vtable) && vtable == base + vtable_rva;
+    };
+    std::uintptr_t frontend = 0, menu = 0, linked_menu = 0, popup = 0;
+    if (!read(base + frontend_manager_rva, frontend) || !matches(frontend, frontend_vtable_rva) ||
+        !read(base + menu_manager_rva, menu) || !matches(menu, menu_vtable_rva) ||
+        !read(frontend + frontend_menu_offset, linked_menu) || linked_menu != menu ||
+        !read(frontend + frontend_hud_offset, result.hud) || result.hud > 3 ||
+        !read(menu + popup_menu_offset, popup))
+        return result;
+    if (popup) {
+        std::uintptr_t owner = 0, job = 0;
+        if (!matches(popup, popup_menu_vtable_rva) || !read(popup + popup_owner_offset, owner) ||
+            owner != menu || !read(popup + popup_top_job_offset, job))
+            return result;
+        result.popup_job = job != 0;
+        // Useful for comparing dialogue transitions. The ID alone does not
+        // establish that the player is currently listening to spoken dialogue.
+        read(popup + popup_talk_id_offset, result.talk_id);
+    }
+    result.readable = true;
+    return result;
+}
+bool recipient_menu_ready(std::uintptr_t base, bool world_ready, ULONGLONG now) {
+    using shared_loot::MenuGateState;
+    static shared_loot::RecipientMenuGate gate;
+    static MenuGateState last_state = MenuGateState::Ready;
+    static MenuEvidence last{};
+    const auto menu = recipient_menu(base);
+    // 3 is the normal HUD state. The popup job also covers menu transitions
+    // when the HUD byte still reads normal.
+    const auto state =
+        gate.update(world_ready && menu.readable, menu.hud != 3 || menu.popup_job, now);
+    if (state != last_state || menu.readable != last.readable || menu.hud != last.hud ||
+        menu.popup_job != last.popup_job || menu.talk_id != last.talk_id) {
+        Record observation{};
+        observation.kind = 10;
+        observation.time = now;
+        observation.flags = static_cast<unsigned>(state);
+        observation.menu = menu;
+        push_record(observation);
+        last_state = state;
+        last = menu;
+    }
+    return state == MenuGateState::Ready;
+}
 // Incoming awards stay buffered while dead, loading or paused. The persistent
 // character key is independent of PlayerIns pointers, which change at respawn.
 void frame_execute(void*, const void*) {
@@ -524,11 +587,15 @@ void frame_execute(void*, const void*) {
         previous_reason = reason;
     }
     static ULONGLONG next_probe = 0;
-    if (!ready || inside || GetTickCount64() < next_probe ||
-        !TryAcquireSRWLockExclusive(&award_gate))
+    // Keep the router world-ready in a shop so a local purchase can still
+    // send. Only leasing incoming awards is gated by local UI state.
+    if (!recipient_menu_ready(base, ready, GetTickCount64()) || inside ||
+        GetTickCount64() < next_probe || !TryAcquireSRWLockExclusive(&award_gate))
         return;
     inside = true;
     for (unsigned i = 0; i < 4; ++i) {
+        if (i && !recipient_menu_ready(base, ready, GetTickCount64()))
+            break; // The previous grant may have opened a menu.
         shared_loot::Delivery delivery{};
         if (!steam_bridge.take(delivery, GetTickCount64()))
             break;
@@ -686,6 +753,17 @@ void flush_records(FILE* log) {
         return;
     }
     while (pop_record(record)) {
+        if (record.kind == 10) {
+            const char* states[] = {"unavailable", "menu_busy", "settling_after_menu", "ready"};
+            log_printf(log,
+                       "{\"event\":\"recipient_menu_state\",\"tick_ms\":%llu,\"state\":\"%s\","
+                       "\"readable\":%s,\"hud\":%u,\"popup_job\":%s,\"talk_id\":%d}\n",
+                       static_cast<unsigned long long>(record.time), states[record.flags],
+                       record.menu.readable ? "true" : "false",
+                       static_cast<unsigned>(record.menu.hud),
+                       record.menu.popup_job ? "true" : "false", record.menu.talk_id);
+            continue;
+        }
         if (record.kind == 8 || record.kind == 9) {
             log_printf(
                 log,
@@ -879,7 +957,7 @@ DWORD WINAPI diagnostic_worker(void* parameter) {
     InterlockedExchange(&logging_enabled, settings.logging ? 1 : 0);
     InterlockedExchange(&shop_sharing_enabled, settings.shop_purchases ? 1 : 0);
     FILE* log = create_runtime_log(path, settings.logging);
-    log_text("{\"event\":\"startup\",\"build\":\"0.5.0-test.3\",\"mode\":\"steam_shared_loot\","
+    log_text("{\"event\":\"startup\",\"build\":\"0.5.0-test.5\",\"mode\":\"steam_shared_loot\","
              "\"lan_bridge\":false}\n",
              log);
     log_printf(log,
