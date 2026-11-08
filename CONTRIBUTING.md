@@ -1,6 +1,6 @@
 # Development
 
-The active Steam implementation is in `src/session_router.cpp`, `src/steam_bridge_win.cpp`, `src/diagnostics_win.cpp`, and `include/source_filter.h`. `shared_loot.cpp` exposes an earlier portable C API for tests; `rowa_transport.cpp` and related scripts retain disabled LAN/Rowa diagnostic experiments. Historical investigation notes are under `docs/`.
+The active Steam implementation is in `src/session_router.cpp`, `src/steam_bridge_win.cpp`, `src/diagnostics_win.cpp`, `src/inventory_probe.cpp`, and `include/source_filter.h`. `shared_loot.cpp` exposes an earlier portable C API for tests; `rowa_transport.cpp` and related scripts retain disabled LAN/Rowa diagnostic experiments. Historical investigation notes are under `docs/`.
 
 ```sh
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug
