@@ -36,7 +36,7 @@ for source in ["src/buffer.c", "src/hook.c", "src/trampoline.c", "src/hde/hde64.
                     str(minhook / source), "-o", str(obj)], cwd=ROOT, check=True)
     objects.append(str(obj))
 subprocess.run(base + ["-Ithird_party/minhook/include", "-DSL_BUILD", "-shared", "src/shared_loot.cpp",
-                       "src/diagnostics_win.cpp", "src/rowa_transport.cpp", "src/session_router.cpp", "src/inventory_probe.cpp", "src/steam_bridge_win.cpp", *objects, "-lbcrypt", "-lws2_32",
+                       "src/diagnostics_win.cpp", "src/rowa_transport.cpp", "src/session_router.cpp", "src/inventory_probe.cpp", "src/shop_purchase.cpp", "src/steam_bridge_win.cpp", *objects, "-lbcrypt", "-lws2_32",
                        "-o", str(output / "SharedLoot.dll")], cwd=ROOT, check=True)
 subprocess.run(base + ["tests/core_tests.cpp", str(output / "shared_loot.lib"),
                        "-o", str(output / "core_tests.exe")], cwd=ROOT, check=True)
@@ -46,6 +46,7 @@ subprocess.run(base + ["tests/session_router_tests.cpp", "src/session_router.cpp
 subprocess.run(base + ["tests/rowa_transport_tests.cpp", "src/rowa_transport.cpp", "-lws2_32", "-o", str(output / "rowa_transport_tests.exe")], cwd=ROOT, check=True)
 subprocess.run(base + ["tests/inventory_probe_tests.cpp", "src/inventory_probe.cpp", "src/session_router.cpp", "-o", str(output / "inventory_probe_tests.exe")], cwd=ROOT, check=True)
 subprocess.run(base + ["tests/delivery_buffer_tests.cpp", "src/session_router.cpp", "-o", str(output / "delivery_buffer_tests.exe")], cwd=ROOT, check=True)
+subprocess.run(base + ["tests/shop_purchase_tests.cpp", "src/shop_purchase.cpp", "src/inventory_probe.cpp", "src/session_router.cpp", "-o", str(output / "shop_purchase_tests.exe")], cwd=ROOT, check=True)
 mock = output / "mock-steam"
 mock.mkdir(exist_ok=True)
 subprocess.run(base + ["-shared", "tests/fake_steam_api.cpp", "src/session_router.cpp", "-o", str(mock / "steam_api64.dll")], cwd=ROOT, check=True)

@@ -136,7 +136,6 @@ int SL_ApplyNext(SL_Context* c, SL_GrantFn grant, void* user) {
 BOOL WINAPI DllMain(HINSTANCE module, DWORD reason, LPVOID) {
     if (reason == DLL_PROCESS_ATTACH) {
         DisableThreadLibraryCalls(module);
-        OutputDebugStringW(L"[SharedLoot] Diagnostic DLL loaded. Sharing is NOT active.\n");
         sl_start_diagnostics(module);
     }
     return TRUE;

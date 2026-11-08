@@ -13,6 +13,7 @@
 #include "rowa_transport.h"
 #include "steam_bridge.h"
 #include "inventory_probe.h"
+#include "shop_purchase.h"
 #include "installed_game_profile.h"
 #include "verified_task_profile.h"
 #include "MinHook.h"
@@ -44,6 +45,21 @@ void log_close(FILE* log) {
     if (log)
         std::fclose(log);
 }
+struct RuntimeSettings {
+    bool logging = false, shop_purchases = true, gathering = true;
+};
+RuntimeSettings read_settings(const wchar_t* config) {
+    RuntimeSettings settings{};
+    if (!config)
+        return settings;
+    // Legacy diagnostics.enabled is only a logging fallback now. It no longer
+    // enables/disables the worker or item sharing.
+    int legacy = GetPrivateProfileIntW(L"diagnostics", L"enabled", 0, config);
+    settings.logging = GetPrivateProfileIntW(L"logging", L"enabled", legacy, config) == 1;
+    settings.shop_purchases = GetPrivateProfileIntW(L"sharing", L"shop_purchases", 1, config) == 1;
+    settings.gathering = GetPrivateProfileIntW(L"sharing", L"gathering_materials", 1, config) == 1;
+    return settings;
+}
 FILE* create_runtime_log(const wchar_t* folder, bool enabled) {
     if (!enabled)
         return nullptr; // do not even create a logs directory
@@ -63,7 +79,9 @@ FILE* create_runtime_log(const wchar_t* folder, bool enabled) {
 using shared_loot::AwardPacket;
 using AwardFn = std::uintptr_t (*)(void*, const void*, void*, std::uint32_t);
 AwardFn original_award = nullptr;
-volatile LONG logging_enabled = 1;
+using ShopFn = std::uintptr_t (*)(void*);
+ShopFn original_shop = nullptr;
+volatile LONG logging_enabled = 1, shop_sharing_enabled = 1;
 // Snapshot only value data at the hook boundary. The worker must never retain
 // pointers to temporary game award packets or notification contexts.
 struct Record {
@@ -349,6 +367,81 @@ bool grant_game_inventory(void* p, const AwardPacket& packet) {
     return issue_shared_packet(reinterpret_cast<void*>(static_cast<GameGrantAccess*>(p)->manager),
                                packet);
 }
+struct ShopContext {
+    void* transaction;
+    std::uintptr_t base, data;
+};
+bool shop_snapshot(void* p, const AwardPacket& packet, shared_loot::InventoryCounts& counts,
+                   std::uint16_t& committed) {
+    auto& state = *static_cast<ShopContext*>(p);
+    std::uintptr_t menu = 0, stats = 0;
+    return read_local(reinterpret_cast<void*>(state.base + shared_loot::profile::menu_manager_rva),
+                      &menu, 8) &&
+           menu && read_local(reinterpret_cast<void*>(menu + 8), &stats, 8) && stats &&
+           read_local(reinterpret_cast<void*>(stats + 0x94), &committed, 2) &&
+           owned_counts(state.base, state.data, packet, counts);
+}
+std::uintptr_t shop_native(void* p) {
+    return original_shop(static_cast<ShopContext*>(p)->transaction);
+}
+std::uintptr_t observe_shop(void* transaction) {
+    if (inside || !InterlockedCompareExchange(&shop_sharing_enabled, 0, 0) ||
+        !InterlockedCompareExchange(&steam_started, 0, 0) ||
+        InterlockedCompareExchange(&steam_paused, 0, 0))
+        return original_shop(transaction);
+    struct Guard {
+        Guard() {
+            AcquireSRWLockExclusive(&award_gate);
+            inside = true;
+        }
+        ~Guard() {
+            inside = false;
+            ReleaseSRWLockExclusive(&award_gate);
+        }
+    } guard;
+    auto base = reinterpret_cast<std::uintptr_t>(GetModuleHandleW(nullptr));
+    std::uintptr_t data = 0;
+    AwardPacket offer{};
+    shared_loot::MemoryReader reader{nullptr, &probe_read};
+    bool valid =
+        player_data(base, data) &&
+        shared_loot::read_shop_offer(reader, reinterpret_cast<std::uintptr_t>(transaction), offer);
+    ShopContext context{transaction, base, data};
+    // Even if probing fails, execute the original purchase once and preserve
+    // its raw return. The engine alone charges runes/currency and changes stock.
+    auto result = shared_loot::observe_purchase(
+        {&context, valid ? &shop_snapshot : nullptr, &shop_native}, offer);
+    Record observed{};
+    observed.kind = 8;
+    observed.valid = valid;
+    observed.packet = result.packet;
+    observed.time = GetTickCount64();
+    observed.flags = static_cast<unsigned>(result.outcome);
+    push_record(observed);
+    if (result.outcome == shared_loot::ShopOutcome::Shared &&
+        steam_bridge.capture(result.packet, GetTickCount64(), true)) {
+        observed.kind = 9;
+        push_record(observed);
+    }
+    return result.native_result;
+}
+bool install_shop_hook(HMODULE game, FILE* log) {
+    const auto target =
+        reinterpret_cast<unsigned char*>(game) + shared_loot::profile::shop_transaction_rva;
+    unsigned char prologue[32]{};
+    if (!read_local(target, prologue, sizeof(prologue)) ||
+        std::memcmp(prologue, shared_loot::profile::shop_transaction_prologue, sizeof(prologue))) {
+        log_text("{\"event\":\"shop_hook_disabled\",\"reason\":\"signature_changed\"}\n", log);
+        return false;
+    }
+    auto status = MH_CreateHook(target, reinterpret_cast<void*>(&observe_shop),
+                                reinterpret_cast<void**>(&original_shop));
+    if (status == MH_OK)
+        status = MH_EnableHook(target);
+    log_printf(log, "{\"event\":\"shop_hook_status\",\"status\":\"%s\",\"rva\":\"0x%x\"}\n",
+               MH_StatusToString(status), shared_loot::profile::shop_transaction_rva);
+    return status == MH_OK;
+}
 // Incoming awards stay buffered while dead, loading or paused. The persistent
 // character key is independent of PlayerIns pointers, which change at respawn.
 void frame_execute(void*, const void*) {
@@ -574,6 +667,18 @@ void flush_records(FILE* log) {
         return;
     }
     while (pop_record(record)) {
+        if (record.kind == 8 || record.kind == 9) {
+            log_printf(
+                log,
+                "{\"event\":\"%s\",\"tick_ms\":%llu,\"result\":\"%s\",\"raw_item\":\"0x%08x\","
+                "\"quantity\":%u}\n",
+                record.kind == 9 ? "shop_purchase_sent" : "shop_purchase_observed",
+                static_cast<unsigned long long>(record.time),
+                shared_loot::shop_outcome_name(static_cast<shared_loot::ShopOutcome>(record.flags)),
+                record.packet.count ? record.packet.entries[0].item : 0,
+                record.packet.count ? record.packet.entries[0].quantity : 0);
+            continue;
+        }
         if (record.kind == 6) {
             const char* reasons[] = {"game_state_unavailable", "dead", "settling_after_load",
                                      "paused", "ready"};
@@ -749,17 +854,18 @@ DWORD WINAPI diagnostic_worker(void* parameter) {
     wchar_t config[32768]{};
     if (std::swprintf(config, 32768, L"%ls\\SharedLoot.ini", path) < 0)
         return 0;
-    FILE* log = create_runtime_log(path, true);
-    if (!log)
-        return 0;
-    log_text("{\"event\":\"startup\",\"build\":\"0.5.0-test.1\",\"mode\":\"steam_shared_loot\","
+    const auto settings = read_settings(config);
+    InterlockedExchange(&logging_enabled, settings.logging ? 1 : 0);
+    InterlockedExchange(&shop_sharing_enabled, settings.shop_purchases ? 1 : 0);
+    FILE* log = create_runtime_log(path, settings.logging);
+    log_text("{\"event\":\"startup\",\"build\":\"0.5.0-test.2\",\"mode\":\"steam_shared_loot\","
              "\"lan_bridge\":false}\n",
              log);
-    if (GetPrivateProfileIntW(L"diagnostics", L"enabled", 0, config) != 1) {
-        log_text("{\"event\":\"disabled\",\"reason\":\"config_missing_or_disabled\"}\n", log);
-        log_close(log);
-        return 0;
-    }
+    log_printf(log,
+               "{\"event\":\"settings\",\"logging\":%s,\"shop_purchases\":%s,\"gathering_"
+               "materials\":%s}\n",
+               settings.logging ? "true" : "false", settings.shop_purchases ? "true" : "false",
+               settings.gathering ? "true" : "false");
     // The loader/profile must have disabled EAC; do not attach in an EAC process.
     if (GetModuleHandleW(L"EasyAntiCheat_EOS.dll") || GetModuleHandleW(L"EasyAntiCheat.dll")) {
         log_text("{\"event\":\"disabled\",\"reason\":\"eac_module_present\"}\n", log);
@@ -797,9 +903,16 @@ DWORD WINAPI diagnostic_worker(void* parameter) {
         log_close(log);
         return 0;
     }
+    if (settings.shop_purchases) {
+        log_text("{\"event\":\"shop_hook_installing\"}\n", log);
+        log_flush(log);
+        install_shop_hook(game, log);
+        log_flush(log);
+    }
     bool steam_requested = GetPrivateProfileIntW(L"steam", L"enabled", 1, config) == 1 &&
                            GetModuleHandleW(L"ersc.dll");
-    InterlockedExchange(&steam_gathering, GetPrivateProfileIntW(L"steam", L"gathering_materials", 1, config) == 1);
+    InterlockedExchange(&steam_gathering, settings.gathering ? 1 : 0);
+    steam_bridge.set_shop_sharing(settings.shop_purchases);
     if (steam_requested) {
         if (steam_bridge.start()) {
             InterlockedExchange(&steam_started, 1);
@@ -1164,4 +1277,77 @@ extern "C" SL_API int SL_BroadGrantSelfTest() {
     original_award = saved;
     InterlockedExchange(&starting, 0);
     return ok ? 0 : -2;
+}
+
+extern "C" SL_API int SL_ReadSettingsFile(const wchar_t* config) {
+    auto settings = read_settings(config);
+    return (settings.logging ? 1 : 0) | (settings.shop_purchases ? 2 : 0) |
+           (settings.gathering ? 4 : 0);
+}
+extern "C" SL_API int SL_TestLoggingSink(const wchar_t* folder, int enabled) {
+    if (!folder)
+        return -1;
+    FILE* log = create_runtime_log(folder, enabled == 1);
+    log_text("{\"event\":\"logging_self_test\"}\n", log);
+    log_flush(log);
+    bool opened = log != nullptr;
+    log_close(log);
+    return opened ? 1 : 0;
+}
+
+extern "C" SL_API int SL_ShopHookSelfTest() {
+    if (InterlockedCompareExchange(&starting, 1, 0))
+        return -1;
+    auto saved = original_shop;
+    auto active = InterlockedExchange(&steam_started, 1);
+    auto enabled = InterlockedExchange(&shop_sharing_enabled, 1);
+    auto paused = InterlockedExchange(&steam_paused, 0);
+    // Use the real shop prefix: its third instruction has an unaligned
+    // immediate that the trampoline decoder used to read through a typed pointer.
+    constexpr std::size_t prefix_size = 15;
+    constexpr unsigned char epilogue[] = {
+        0x48, 0x8d, 0x41, 73,   // lea rax, [rcx + 73]
+        0x48, 0x83, 0xc4, 0x30, // add rsp, 0x30
+        0x5f, 0xc3              // pop rdi; ret
+    };
+    void* target = VirtualAlloc(nullptr, prefix_size + sizeof(epilogue), MEM_RESERVE | MEM_COMMIT,
+                                PAGE_READWRITE);
+    if (target) {
+        std::memcpy(target, shared_loot::profile::shop_transaction_prologue, prefix_size);
+        std::memcpy(static_cast<unsigned char*>(target) + prefix_size, epilogue, sizeof(epilogue));
+        DWORD old_protection = 0;
+        if (!VirtualProtect(target, prefix_size + sizeof(epilogue), PAGE_EXECUTE_READ,
+                            &old_protection) ||
+            !FlushInstructionCache(GetCurrentProcess(), target, prefix_size + sizeof(epilogue))) {
+            VirtualFree(target, 0, MEM_RELEASE);
+            target = nullptr;
+        }
+    }
+    auto status = target ? MH_Initialize() : MH_ERROR_MEMORY_ALLOC;
+    int result = -2;
+    if (status == MH_OK) {
+        status = MH_CreateHook(target, reinterpret_cast<void*>(&observe_shop),
+                               reinterpret_cast<void**>(&original_shop));
+        if (status == MH_OK && MH_EnableHook(target) == MH_OK) {
+            volatile ShopFn call = reinterpret_cast<ShopFn>(target);
+            auto value = call(reinterpret_cast<void*>(100));
+            Record record{};
+            bool found = false;
+            while (pop_record(record))
+                if (record.kind == 8)
+                    found = true;
+            result = value == 173 && found && !inside ? 0 : -3;
+            if (MH_DisableHook(target) != MH_OK)
+                result = -4;
+        }
+        MH_Uninitialize();
+    }
+    if (target)
+        VirtualFree(target, 0, MEM_RELEASE);
+    original_shop = saved;
+    InterlockedExchange(&steam_started, active);
+    InterlockedExchange(&shop_sharing_enabled, enabled);
+    InterlockedExchange(&steam_paused, paused);
+    InterlockedExchange(&starting, 0);
+    return result;
 }
