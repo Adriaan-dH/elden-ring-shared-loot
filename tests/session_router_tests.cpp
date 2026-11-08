@@ -54,8 +54,11 @@ int main() {
     CHECK(!a.take_delivery(delivery, 2001));
     CHECK(b.take_delivery(delivery, 2001));
     CHECK(std::memcmp(&delivery.packet, &loot, sizeof(loot)) == 0);
+    CHECK(b.finish_delivery(delivery, DeliveryReason::Verified, 2001));
     CHECK(c.take_delivery(delivery, 2001));
+    CHECK(c.finish_delivery(delivery, DeliveryReason::Verified, 2001));
     CHECK(!b.take_delivery(delivery, 2001));
+    pump(); // Drain the explicit completion reports before inspecting a pickup frame.
     CHECK(b.capture(loot, 2002) == 2);
     RoutedMessage replay{};
     CHECK(b.take_send(replay));
@@ -63,24 +66,28 @@ int main() {
     CHECK(a.receive(202, replay.wire.bytes.data(), shared_wire_size, 2002));
     CHECK(!a.receive(202, replay.wire.bytes.data(), shared_wire_size, 2002));
     CHECK(a.take_delivery(delivery, 2003));
+    CHECK(a.finish_delivery(delivery, DeliveryReason::Verified, 2003));
     CHECK(!a.take_delivery(delivery, 2003));
     CHECK(!a.receive(999, replay.wire.bytes.data(), shared_wire_size, 2002));
     CHECK(!a.receive(202, replay.wire.bytes.data(), 20, 2002));
     auto invalid = replay.wire;
     invalid.bytes[5] = 99;
     CHECK(!a.receive(202, invalid.bytes.data(), shared_wire_size, 2002));
-    // Loaded-world transitions discard pending deliveries and require new handshakes.
+    // Loading pauses delivery without destroying the queue or handshake generation.
     CHECK(c.capture(loot, 2004) == 2);
     pump();
     a.world(false);
     CHECK(!a.take_delivery(delivery, 2005));
     CHECK(a.capture(loot, 2005) == 0);
     a.world(true);
-    CHECK(a.stats().ready == 0);
+    CHECK(a.stats().pending == 1);
     for (auto* p : {&a, &b, &c})
         p->tick(4000);
     pump();
     CHECK(a.stats().ready == 2);
+    CHECK(a.take_delivery(delivery, 4001));
+    CHECK(a.finish_delivery(delivery, DeliveryReason::Verified, 4001));
+    CHECK(!a.take_delivery(delivery, 4001));
     a.members(456, {101, 202});
     CHECK(!a.member(303));
     CHECK(a.stats().members == 1);

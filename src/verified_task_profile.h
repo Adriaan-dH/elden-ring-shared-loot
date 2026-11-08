@@ -11,4 +11,13 @@ inline constexpr unsigned char register_task_prologue[32] = {
 inline constexpr std::uint32_t map_item_manager_rva = 0x3d6eae0;
 inline constexpr std::uint32_t world_chr_manager_rva = 0x3d6d018;
 inline constexpr std::uint32_t local_player_offset = 0x1e508;
+// GameDataMan + 8 and PlayerGameData equipment/storage references are visible
+// in the locked award function and its 0x55ff90 / 0x2488c0 callees.
+inline constexpr std::uint32_t game_data_manager_rva = 0x3d64fb8;
+inline constexpr std::uint32_t player_inventory_offset = 0x408; // 0x2b0 + 0x158
+inline constexpr std::uint32_t player_storage_offset = 0x8d0;
+// Read-only ChrIns/CSChrDataModule fields. Validate owner, vtable and HP range.
+inline constexpr std::uint32_t chr_modules_offset = 0x190;
+inline constexpr std::uint32_t chr_hp_offset = 0x138;
+inline constexpr std::uint32_t chr_death_flags_offset = 0x1c5;
 } // namespace shared_loot::profile

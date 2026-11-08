@@ -80,6 +80,7 @@ bool SteamBridge::start() {
     {
         std::lock_guard<std::mutex> guard(mutex_);
         router_.initialize(self_, nonce);
+        router_.set_shop_sharing(share_shops_);
     }
     entered_.owner = this;
     entered_.handler = &entered;
@@ -176,6 +177,10 @@ void SteamBridge::tick(std::uint64_t now) {
         // Reliable, AutoRestartBrokenSession. Our own channel only.
         int result = send_(messaging_, &identity, message.wire.bytes.data(), shared_wire_size,
                            8 | 32, steam_channel);
+        {
+            std::lock_guard<std::mutex> guard(mutex_);
+            router_.send_result(message, result, now);
+        }
         if (result != 1)
             ++errors_;
         if (message.wire.bytes[7] == 1)
@@ -198,14 +203,35 @@ void SteamBridge::tick(std::uint64_t now) {
 }
 // The frame task and award hook call these while the worker polls Steam.
 // Serialize access to the portable router without exposing game pointers to it.
+void SteamBridge::set_shop_sharing(bool enabled) {
+    std::lock_guard<std::mutex> guard(mutex_);
+    share_shops_ = enabled;
+    router_.set_shop_sharing(enabled);
+}
 void SteamBridge::set_world(bool ready) {
     std::lock_guard<std::mutex> guard(mutex_);
     world_ = ready;
     router_.world(ready);
 }
-unsigned SteamBridge::capture(const AwardPacket& packet, std::uint64_t now) {
+void SteamBridge::set_character(std::uint64_t identity) {
     std::lock_guard<std::mutex> guard(mutex_);
-    return router_.capture(packet, now);
+    router_.character(identity);
+}
+bool SteamBridge::defer(const Delivery& d, std::uint64_t now) {
+    std::lock_guard<std::mutex> guard(mutex_);
+    return router_.defer_delivery(d, now);
+}
+bool SteamBridge::finish(const Delivery& d, DeliveryReason reason, std::uint64_t now) {
+    std::lock_guard<std::mutex> guard(mutex_);
+    return router_.finish_delivery(d, reason, now);
+}
+bool SteamBridge::take_event(DeliveryEvent& e) {
+    std::lock_guard<std::mutex> guard(mutex_);
+    return router_.take_event(e);
+}
+unsigned SteamBridge::capture(const AwardPacket& packet, std::uint64_t now, bool shop_purchase) {
+    std::lock_guard<std::mutex> guard(mutex_);
+    return router_.capture(packet, now, shop_purchase);
 }
 bool SteamBridge::take(Delivery& out, std::uint64_t now) {
     std::lock_guard<std::mutex> guard(mutex_);
@@ -264,6 +290,8 @@ extern "C" SL_API int SL_SteamAdapterMockTest() {
     Delivery delivery{};
     if (!bridge.take(delivery, 12001) || std::memcmp(&packet, &delivery.packet, sizeof(packet)))
         return -9;
+    if (!bridge.finish(delivery, DeliveryReason::Verified, 12001))
+        return -11;
     if (bridge.take(delivery, 12001) || bridge.status().send_errors)
         return -10;
     reset();

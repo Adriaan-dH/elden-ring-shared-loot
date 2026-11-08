@@ -48,6 +48,7 @@ API int MockTake(AwardPacket* out) {
     Delivery delivery{};
     if (!remote.take_delivery(delivery, clock_ms))
         return 0;
+    remote.finish_delivery(delivery, DeliveryReason::Verified, clock_ms);
     *out = delivery.packet;
     return 1;
 }

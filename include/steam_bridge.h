@@ -16,7 +16,12 @@ class SteamBridge {
     bool start();
     void tick(std::uint64_t now);
     void set_world(bool ready);
-    unsigned capture(const AwardPacket&, std::uint64_t now);
+    void set_shop_sharing(bool enabled);
+    void set_character(std::uint64_t identity);
+    bool defer(const Delivery&, std::uint64_t now);
+    bool finish(const Delivery&, DeliveryReason, std::uint64_t now);
+    bool take_event(DeliveryEvent&);
+    unsigned capture(const AwardPacket&, std::uint64_t now, bool shop_purchase = false);
     bool take(Delivery&, std::uint64_t now);
     SteamStatus status();
 
@@ -29,7 +34,7 @@ class SteamBridge {
     std::mutex mutex_;
     SessionRouter router_;
     std::atomic<std::uint64_t> lobby_{0}, callback_count_{0};
-    bool available_ = false, world_ = false;
+    bool available_ = false, world_ = false, share_shops_ = true;
     std::uint64_t self_ = 0, last_members_ = 0, errors_ = 0, hello_frames_ = 0;
     void* matchmaking_ = nullptr;
     void* messaging_ = nullptr;
