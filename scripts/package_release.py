@@ -1,11 +1,12 @@
 """Build the slim addon-only archive for the experimental GitHub release."""
 import argparse
+import configparser
 from pathlib import Path
 import struct
 import zipfile
 
 ROOT = Path(__file__).resolve().parents[1]
-VERSION = "0.4.1"
+VERSION = "0.5.0-test.5"
 
 
 def main():
@@ -24,6 +25,10 @@ def main():
     notices = ((ROOT / "LICENSE").read_bytes()
                + b"\n--- Third-party attribution: MinHook ---\n\n"
                + (ROOT / "third_party/minhook/LICENSE.txt").read_bytes())
+    defaults = configparser.ConfigParser()
+    defaults.read(ROOT / "packaging/SharedLoot.steam.ini")
+    if defaults.getboolean("logging", "enabled") or not defaults.getboolean("sharing", "shop_purchases"):
+        raise SystemExit("Release defaults must keep logging off and shop sharing on")
     files = {
         "shared-loot/SharedLoot.dll": dll,
         "shared-loot/SharedLoot.ini": (ROOT / "packaging/SharedLoot.steam.ini").read_bytes(),
@@ -31,7 +36,7 @@ def main():
         "shared-loot/LICENSE.txt": notices,
     }
     args.output.mkdir(parents=True, exist_ok=True)
-    archive = args.output / f"SharedLoot-{VERSION}-experimental.zip"
+    archive = args.output / f"SharedLoot-{VERSION}.zip"
     with zipfile.ZipFile(archive, "w", zipfile.ZIP_DEFLATED) as package:
         for name, data in files.items():
             package.writestr(name, data)
